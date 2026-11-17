@@ -30,16 +30,16 @@ export interface GrowKazResult {
 /**
  * Autonomous AI Director that:
  * 1. Takes raw Hindi/Hinglish/English narrative
- * 2. Generates voiceover audio + word timings
- * 3. Uses Gemini to autonomously code shots.json, cast.js, sets, and shot modules
- * 4. Renders the video using GrowKaz Chromium headless engine + FFmpeg audio muxing
+ * 2. Generates real natural studio voiceover (edge-tts / Gemini) + word timestamps
+ * 3. Autonomously codes shots.json, cast.js, sets, and shot modules
+ * 4. Renders the video using GrowKaz Chromium headless engine + procedural SFX/music audio mix
  */
 export async function generateGrowKazVideo(config: GrowKazProjectConfig): Promise<GrowKazResult> {
   const {
     title = 'AI Stickman Explainer',
     script,
     aspect = '9:16',
-    resolution = '1080p',
+    resolution = '720p',
     fps = 24,
     style = 'emerald',
     apiKey,
@@ -48,53 +48,62 @@ export async function generateGrowKazVideo(config: GrowKazProjectConfig): Promis
 
   const slug = `video_${Date.now()}`;
   const projectDir = path.join(GROWKAZ_KIT_DIR, 'projects', slug);
+  const relProject = `projects/${slug}`;
 
   // Create project directory structure
   ['input', 'timeline', 'story', 'scenes/sets', 'scenes/shots', 'build', 'out'].forEach((dir) => {
     fs.mkdirSync(path.join(projectDir, dir), { recursive: true });
   });
 
-  // STEP 1: Voiceover & Audio Synthesis
-  onProgress(15, '1. Synthesizing voiceover narration & syllable timestamps...');
-  const voiceoverPath = path.join(projectDir, 'input', 'voiceover.mp3');
-  const wordCount = script.trim().split(/\s+/).length;
-  const estimatedSeconds = Math.max(6, Math.ceil((wordCount / 2.6)));
+  const scriptPath = path.join(projectDir, 'input', 'script.txt');
+  fs.writeFileSync(scriptPath, script.trim(), 'utf8');
 
-  // Generate speech-modulated audio waveform
-  const sampleRate = 48000;
-  const totalSamples = estimatedSeconds * sampleRate;
-  const buffer = Buffer.alloc(totalSamples * 2);
-  for (let i = 0; i < totalSamples; i++) {
-    const t = i / sampleRate;
-    const syllFreq = 2.8;
-    const mouthEnvelope = Math.pow(Math.max(0, Math.sin(t * syllFreq * Math.PI)), 1.5);
-    const fundamental = 135 + Math.sin(t * 1.8) * 15;
-    const tone = Math.sin(2 * Math.PI * fundamental * t) * 0.5 + Math.sin(2 * Math.PI * (fundamental * 2) * t) * 0.25;
-    const sample = Math.round(tone * mouthEnvelope * 22000);
-    buffer.writeInt16LE(sample, i * 2);
+  // STEP 1: Voiceover & Audio Synthesis using edge-tts
+  onProgress(15, '1. Synthesizing natural studio voiceover (Hindi/Hinglish)...');
+  const voiceoverPath = path.join(projectDir, 'input', 'voiceover.mp3');
+  const wordsJsonPath = path.join(projectDir, 'timeline', 'words.json');
+
+  console.log(`[GrowKaz AI] Synthesizing speech via edge-tts for project: ${slug}...`);
+  try {
+    await execAsync(`python tools/tts_generate.py --project "${relProject}" --voice "hi-IN-MadhurNeural"`, {
+      cwd: GROWKAZ_KIT_DIR,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch (ttsErr) {
+    console.warn('[GrowKaz AI] Primary voice failed, falling back to English voice:', ttsErr);
+    await execAsync(`python tools/tts_generate.py --project "${relProject}" --voice "en-US-GuyNeural"`, {
+      cwd: GROWKAZ_KIT_DIR,
+      maxBuffer: 20 * 1024 * 1024,
+    });
   }
 
-  const rawPcmPath = path.join(projectDir, 'input', 'raw.pcm');
-  fs.writeFileSync(rawPcmPath, buffer);
-  await execAsync(`ffmpeg -y -f s16le -ar ${sampleRate} -ac 1 -i "${rawPcmPath}" -ar 48000 -ac 2 -b:a 192k "${voiceoverPath}"`);
-  if (fs.existsSync(rawPcmPath)) fs.unlinkSync(rawPcmPath);
+  // Obtain exact audio duration from ffprobe or words.json
+  let actualDuration = 8.0;
+  if (fs.existsSync(wordsJsonPath)) {
+    try {
+      const wordsData = JSON.parse(fs.readFileSync(wordsJsonPath, 'utf8'));
+      if (wordsData.words && wordsData.words.length > 0) {
+        actualDuration = Math.ceil(wordsData.words[wordsData.words.length - 1].end + 0.5);
+      }
+    } catch (e) {
+      console.warn('[GrowKaz AI] Could not parse words.json for duration:', e);
+    }
+  }
 
-  // STEP 2: Word Timeline Alignment
-  onProgress(30, '2. Aligning word-level syllable timeline...');
-  const words = script.trim().split(/\s+/);
-  const wordDuration = estimatedSeconds / words.length;
-  const wordsTimeline = words.map((w, idx) => ({
-    word: w,
-    start: +(idx * wordDuration).toFixed(3),
-    end: +((idx + 1) * wordDuration).toFixed(3),
-  }));
+  try {
+    const { stdout } = await execAsync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${voiceoverPath}"`);
+    const probeDur = parseFloat(stdout.trim());
+    if (probeDur && !isNaN(probeDur)) {
+      actualDuration = Math.ceil(probeDur + 0.3);
+    }
+  } catch (probeErr) {
+    console.warn('[GrowKaz AI] ffprobe duration check skipped:', probeErr);
+  }
 
-  fs.writeFileSync(
-    path.join(projectDir, 'timeline', 'words.json'),
-    JSON.stringify({ words: wordsTimeline }, null, 2)
-  );
+  console.log(`[GrowKaz AI] Studio voiceover ready! Total duration: ${actualDuration}s`);
 
-  // Write config.json
+  // STEP 2: Write config.json
+  onProgress(30, '2. Aligning project timeline and subtitle sync...');
   const projectConfig = {
     title,
     aspect,
@@ -103,30 +112,38 @@ export async function generateGrowKazVideo(config: GrowKazProjectConfig): Promis
     style,
     voiceover: 'input/voiceover.mp3',
     script: 'input/script.txt',
-    duration: estimatedSeconds,
+    duration: actualDuration,
     captions: aspect === '9:16',
     bars: null,
-    fadeIn: 0.4,
-    fadeOut: 0.6,
+    fadeIn: 0.3,
+    fadeOut: 0.5,
     music: { enabled: true, gainDb: -16 },
     sfx: { enabled: true, gainDb: -6 },
     loudness: -14,
   };
-  fs.writeFileSync(path.join(projectDir, 'input', 'script.txt'), script, 'utf8');
   fs.writeFileSync(path.join(projectDir, 'config.json'), JSON.stringify(projectConfig, null, 2));
 
   // STEP 3: Autonomous AI Director — Shots Planning
   onProgress(45, '3. AI Director planning shot sequence & cinematic camera drift...');
-  const shotDur = Math.max(2.5, +(estimatedSeconds / Math.min(4, Math.max(2, Math.floor(estimatedSeconds / 3.5)))).toFixed(2));
-  const shotCount = Math.ceil(estimatedSeconds / shotDur);
+  const shotDur = Math.max(2.8, +(actualDuration / Math.min(5, Math.max(2, Math.floor(actualDuration / 3.2)))).toFixed(2));
+  const shotCount = Math.ceil(actualDuration / shotDur);
+
+  // Read word tokens for shot mapping
+  let wordList: string[] = script.trim().split(/\s+/);
+  try {
+    if (fs.existsSync(wordsJsonPath)) {
+      const wData = JSON.parse(fs.readFileSync(wordsJsonPath, 'utf8'));
+      if (wData.words) wordList = wData.words.map((w: any) => w.word);
+    }
+  } catch (e) {}
 
   const shotsList: any[] = [];
   for (let i = 0; i < shotCount; i++) {
     const sStart = +(i * shotDur).toFixed(2);
-    const sEnd = +(Math.min(estimatedSeconds, (i + 1) * shotDur)).toFixed(2);
-    const wordSlice = words.slice(
-      Math.floor((i / shotCount) * words.length),
-      Math.floor(((i + 1) / shotCount) * words.length)
+    const sEnd = +(Math.min(actualDuration, (i + 1) * shotDur)).toFixed(2);
+    const wordSlice = wordList.slice(
+      Math.floor((i / shotCount) * wordList.length),
+      Math.floor(((i + 1) / shotCount) * wordList.length)
     ).join(' ');
 
     shotsList.push({
@@ -134,20 +151,20 @@ export async function generateGrowKazVideo(config: GrowKazProjectConfig): Promis
       start: sStart,
       end: sEnd,
       line: wordSlice,
-      scene: `Dynamic vector scene for phrase: ${wordSlice}`,
+      scene: `Autonomous shot for phrase: ${wordSlice}`,
       set: 'mainSet',
       bars: null,
-      in: { type: i === 0 ? 'fade' : 'cut', dur: 0.3 },
-      sfx: [{ at: 0.3, name: i % 2 === 0 ? 'whoosh' : 'pop', gain: -8 }],
+      in: { type: i === 0 ? 'fade' : 'cut', dur: 0.25 },
+      sfx: [{ at: 0.25, name: i % 2 === 0 ? 'whoosh' : 'pop', gain: -8 }],
       amb: { name: 'roomtone', gain: -24 },
     });
   }
 
   const shotsJson = {
     title,
-    duration: estimatedSeconds,
+    duration: actualDuration,
     shots: shotsList,
-    music: [{ start: 0, end: estimatedSeconds, mood: 'wonder', intensity: 0.4 }],
+    music: [{ start: 0, end: actualDuration, mood: 'wonder', intensity: 0.4 }],
   };
   fs.writeFileSync(path.join(projectDir, 'story', 'shots.json'), JSON.stringify(shotsJson, null, 2));
 
@@ -173,34 +190,49 @@ export const CO_STAR = {
 `;
   fs.writeFileSync(path.join(projectDir, 'scenes', 'cast.js'), castJs, 'utf8');
 
-  // 4b. Write scenes/sets/mainSet.js
+  // 4b. Write scenes/sets/mainSet.js with CORRECT FX.windowFrame callback
   const setJs = `// scenes/sets/mainSet.js
-import { E, V, mood, shade } from '/engine/core.js';
+import { E, V, mood, linGrad, shade } from '/engine/core.js';
 import * as FX from '/engine/fx2d.js';
 
 export function mainSet(g, t, cam = { z: 1, x: 0 }, opts = {}) {
   const M = mood(opts.mood || 'golden');
   const GY = E.H * V(0.8, 0.72);
+  const CX = E.W / 2;
+  const wall = shade(M.wall, -0.2);
+  const wallDark = shade(M.wall, -0.5);
   
   // Wall backdrop
-  g.fillStyle = M.wall || '#1a1420';
+  g.fillStyle = linGrad(g, 0, 0, 0, GY, [shade(wall, 0.1), wall, wallDark]);
   g.fillRect(-1000, -1000, E.W + 2000, E.H + 2000);
   
-  // Floor line
-  g.fillStyle = M.floor || '#0d0a12';
-  g.fillRect(-1000, GY, E.W + 2000, E.H);
-  
   // Signature illuminated window in the background
-  const winW = V(380, 480);
-  const winH = V(280, 360);
-  FX.windowFrame(g, E.W / 2 - winW / 2, GY - winH - 80, winW, winH, {
-    sky: M.sky || ['#ff9944', '#2d1836'],
-    glow: M.key || '#ffe0b0',
+  const winW = V(340, 440);
+  const winH = V(260, 340);
+  const wx = CX - winW / 2;
+  const wy = GY - winH - V(80, 140);
+  
+  FX.windowFrame(g, {
+    x: wx,
+    y: wy,
+    w: winW,
+    h: winH,
     cols: 3,
     rows: 2,
+    frame: wallDark,
+    bar: 8
+  }, (g, x, y, w, h) => {
+    const skyGrad = linGrad(g, 0, y, 0, y + h, M.sky || ['#ff9944', '#2d1836']);
+    g.fillStyle = skyGrad;
+    g.fillRect(x, y, w, h);
   });
   
-  return { GY, M };
+  // Floor line & pavement
+  g.fillStyle = linGrad(g, 0, GY, 0, E.H, [shade(M.floor, -0.1), shade(M.floor, -0.3)]);
+  g.fillRect(-1000, GY, E.W + 2000, E.H);
+  FX.floorLines(g, GY, E.H, 'rgba(0,0,0,.25)', 0.08);
+  
+  return { GY, CX, M };
 }
 `;
   fs.writeFileSync(path.join(projectDir, 'scenes', 'sets', 'mainSet.js'), setJs, 'utf8');
@@ -213,7 +245,7 @@ export function mainSet(g, t, cam = { z: 1, x: 0 }, opts = {}) {
     let shotContent = '';
     if (isBigFace) {
       shotContent = `// scenes/shots/${s.id}.js - Giant Face Close-up
-import { E, V, registerShot, mood, blurLayer, veil, ease, prog } from '/engine/core.js';
+import { E, V, registerShot, mood, blurLayer, veil, ease } from '/engine/core.js';
 import { bigFace } from '/engine/rig2d.js';
 import * as FX from '/engine/fx2d.js';
 import { mainSet } from '../sets/mainSet.js';
@@ -222,11 +254,11 @@ import { HERO } from '../cast.js';
 registerShot('${s.id}', {
   draw(g, t, info) {
     const M = mood('golden');
-    blurLayer(g, 14, (g) => mainSet(g, t, { z: 1.5, x: -60 }, { mood: 'golden' }));
-    veil(g, '#120a10', 0.4);
+    blurLayer(g, 12, (g) => mainSet(g, t, { z: 1.4, x: -50 }, { mood: 'golden' }));
+    veil(g, '#120a10', 0.35);
     
     const r = V(280, 320) * (1 + 0.04 * (t / info.dur));
-    bigFace(g, E.W / 2, E.H * V(0.62, 0.56), r, {
+    bigFace(g, E.W / 2, E.H * V(0.62, 0.54), r, {
       outfit: HERO,
       expr: 'determined',
       look: [0.1, -0.1],
@@ -255,9 +287,9 @@ registerShot('${s.id}', {
     layer(g, cam, 1, (g) => {
       // Character pointing at data
       drawFigure(g, {
-        x: E.W * 0.28,
+        x: E.W * 0.22,
         y: GY,
-        s: V(1.5, 1.6),
+        s: V(1.4, 1.5),
         facing: 1,
         outfit: HERO,
         pose: breathe(POSES.point, t),
@@ -266,16 +298,18 @@ registerShot('${s.id}', {
       });
       
       // Dynamic Data Card
-      UI.dataCard(g, E.W * 0.62, GY - V(360, 480), {
-        title: 'VIRAL GROWTH',
-        value: Math.round(ease.out(Math.min(1, t / 1.5)) * 10000),
-        unit: 'VIEWS',
-        progress: Math.min(1, t / 1.5),
-        color: M.rim,
+      UI.dataCard(g, t, {
+        title: 'VIRAL METRICS',
+        subtitle: 'RETENTION & REACH',
+        from: 10,
+        to: 100,
+        unit: 'K',
+        dur: info.dur * 0.8,
+        total: info.dur,
       });
     });
     
-    FX.dust(g, t);
+    FX.dust(g, t, { count: 30, color: '#ffe2bd', a: 0.3 });
   }
 });
 `;
@@ -315,8 +349,7 @@ registerShot('${s.id}', {
   });
 
   // STEP 5: Render Silent Video via Headless Chromium & Playwright
-  onProgress(75, '5. Headless Chromium rendering 60fps frames frame-by-frame...');
-  const relProject = path.relative(GROWKAZ_KIT_DIR, projectDir).replace(/\\/g, '/');
+  onProgress(75, '5. Headless Chromium rendering vector animation frames...');
   console.log(`[GrowKaz Engine] Rendering video for project: ${relProject}`);
   await execAsync(`node render.mjs --project "${relProject}"`, {
     cwd: GROWKAZ_KIT_DIR,
@@ -324,7 +357,7 @@ registerShot('${s.id}', {
   });
 
   // STEP 6: Sound & Music Muxing via audio/mix.py
-  onProgress(90, '6. Mixing procedural soundtrack, SFX & voiceover at -14 LUFS...');
+  onProgress(90, '6. Mixing procedural soundtrack, SFX & studio voiceover at -14 LUFS...');
   await execAsync(`python audio/mix.py --project "${relProject}"`, {
     cwd: GROWKAZ_KIT_DIR,
     maxBuffer: 50 * 1024 * 1024,
@@ -348,7 +381,7 @@ registerShot('${s.id}', {
     projectDir,
     videoPath: finalMp4Path,
     videoUrl: `/videos/${videoFileName}`,
-    durationSeconds: estimatedSeconds,
+    durationSeconds: actualDuration,
     shotsCount: shotCount,
   };
 }

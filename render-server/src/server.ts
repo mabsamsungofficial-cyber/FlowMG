@@ -31,6 +31,7 @@ const VIDEO_DIR = path.join(PUBLIC_DIR, 'videos');
 
 // Serve static assets (audio, videos)
 app.use(express.static(PUBLIC_DIR));
+app.use('/public', express.static(PUBLIC_DIR));
 
 // In-memory Job Tracker
 const jobs = new Map<string, RenderJobStatus>();

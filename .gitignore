@@ -14,6 +14,7 @@ render-server/node_modules/
 render-server/public/audio/*.mp3
 render-server/public/audio/*.pcm
 render-server/public/videos/*.mp4
+render-server/public/*.png
 render-server/public/FlowMG-Video-Studio.apk
 render-server/out/
 out/
