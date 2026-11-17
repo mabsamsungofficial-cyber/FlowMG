@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Android build outputs & caches
+.gradle/
+android-app/android/.gradle/
+android-app/android/app/build/
+android-app/android/build/
+android-app/android/local.properties
+
+# Render server builds & temp assets
+render-server/node_modules/
+render-server/public/audio/*.mp3
+render-server/public/audio/*.pcm
+render-server/public/videos/*.mp4
+render-server/public/FlowMG-Video-Studio.apk
+render-server/out/
+out/
+
+# GrowKaz Stickman builds & temp projects
+GrowKaz_Stickman/skills/make-2d-video/kit/node_modules/
+GrowKaz_Stickman/skills/make-2d-video/kit/projects/video_*
+GrowKaz_Stickman/skills/make-2d-video/kit/projects/**/build/
+GrowKaz_Stickman/skills/make-2d-video/kit/projects/**/out/
+
+# Local Environment & Secrets
+.env
+.env.local
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
